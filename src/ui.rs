@@ -9,6 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Cell, Clear, Paragraph, Row, Table, Wrap};
 
 use crate::app::{App, Dialog, Screen, Sort};
+use crate::cleanup::Action;
 use crate::size;
 
 const ACCENT: Color = Color::Rgb(0xf0, 0x7a, 0x3a);
@@ -257,17 +258,24 @@ fn draw_cleanup(frame: &mut Frame, app: &mut App, title: Rect, summary: Rect, li
     let Some(cleanup) = &mut app.cleanup else { return };
 
     let text = if cleanup.cleaning() {
-        Line::from(format!(
-            "Cleaning... {} deleted ({})",
-            size::counted(cleanup.progress.files.load(Ordering::Relaxed), "file"),
-            size::format(cleanup.progress.bytes.load(Ordering::Relaxed)),
-        ))
-        .fg(Color::Yellow)
+        let current = cleanup.progress.current.lock().map(|c| c.clone()).unwrap_or_default();
+        Line::from(vec![
+            Span::from(format!(
+                "Cleaning... {} deleted ({})",
+                size::counted(cleanup.progress.files.load(Ordering::Relaxed), "file"),
+                size::format(cleanup.progress.bytes.load(Ordering::Relaxed)),
+            ))
+            .fg(Color::Yellow),
+            Span::from(format!("   {}", shorten(&current, 60))).fg(DIM),
+        ])
     } else {
         let mut spans = vec![
             Span::from(size::format(cleanup.ticked_size())).bold(),
             Span::from(format!(" to free in {} ticked", cleanup.ticked().count())),
         ];
+        if cleanup.dism_ticked() {
+            spans.push(Span::from(", plus what DISM frees"));
+        }
         if cleanup.measuring() {
             spans.push(Span::from("   measuring...").fg(Color::Yellow));
         }
@@ -283,6 +291,7 @@ fn draw_cleanup(frame: &mut Frame, app: &mut App, title: Rect, summary: Rect, li
         .iter()
         .map(|item| {
             let size = match item.size {
+                _ if item.target.action == Action::Dism => "DISM".into(),
                 Some(bytes) => size::format(bytes),
                 None => "...".into(),
             };
@@ -329,14 +338,18 @@ fn draw_clean(frame: &mut Frame, app: &App) {
     let Some(cleanup) = &app.cleanup else { return };
     let mut text = vec![Line::from("Delete the ticked Windows Update files?").bold(), Line::from("")];
     for item in cleanup.ticked() {
+        let size = if item.target.action == Action::Dism { "DISM".into() } else { size::format(item.size.unwrap_or(0)) };
         text.push(Line::from(vec![
-            Span::from(format!("{:>9}  ", size::format(item.size.unwrap_or(0)))),
+            Span::from(format!("{size:>9}  ")),
             Span::from(item.target.label).fg(if item.target.safe { DIR } else { YELLOW }),
         ]));
     }
     text.push(Line::from(""));
     text.push(Line::from(format!("{} deleted permanently (not to the Recycle Bin).", size::format(cleanup.ticked_size()))).fg(DIM));
     text.push(Line::from("Windows downloads updates again if it needs them.").fg(DIM));
+    if cleanup.dism_ticked() {
+        text.push(Line::from("DISM cleans WinSxS the way Windows does; it can take 5 to 30 minutes.").fg(DIM));
+    }
     if cleanup.ticked().any(|i| !i.target.safe) {
         text.push(Line::from(""));
         text.push(Line::from("Windows.old ticked: you can no longer go back to the previous Windows.").fg(RED));

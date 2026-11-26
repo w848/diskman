@@ -1,8 +1,10 @@
 //! Windows Update files that are safe to delete: downloaded updates, the
-//! Delivery Optimization cache, upgrade leftovers, and the previous Windows.
+//! Delivery Optimization cache, upgrade leftovers, the previous Windows, and
+//! the component store (WinSxS), which only DISM may clean.
 //!
-//! Never WinSxS (only DISM may clean it), Installer (needed to repair and
-//! uninstall programs) or SoftwareDistribution\DataStore (the update history).
+//! Never deleted by hand: WinSxS (its files are shared with Windows itself),
+//! Installer (needed to repair and uninstall programs) and
+//! SoftwareDistribution\DataStore (the update history).
 
 use std::fs;
 use std::io;
@@ -16,11 +18,20 @@ use ratatui::widgets::TableState;
 use crate::scan::{self, Progress};
 use crate::size;
 
+#[derive(Clone, Copy, PartialEq)]
+pub enum Action {
+    /// Empty the folder but keep it: Windows expects it there.
+    Empty,
+    /// Delete the folder.
+    Remove,
+    /// Let DISM clean it (WinSxS): old versions of updated components.
+    Dism,
+}
+
 pub struct Target {
     pub label: &'static str,
     pub path: PathBuf,
-    /// Empty the folder but keep it: Windows expects it there.
-    pub contents_only: bool,
+    pub action: Action,
     /// Ticked when the screen opens. Windows.old isn't: it's the way back.
     pub safe: bool,
 }
@@ -33,22 +44,28 @@ pub fn targets() -> Vec<Target> {
         Target {
             label: "Downloaded updates",
             path: windows.join(r"SoftwareDistribution\Download"),
-            contents_only: true,
+            action: Action::Empty,
             safe: true,
         },
         Target {
             label: "Delivery Optimization cache",
             path: windows.join(r"ServiceProfiles\NetworkService\AppData\Local\Microsoft\Windows\DeliveryOptimization\Cache"),
-            contents_only: true,
+            action: Action::Empty,
             safe: true,
         },
-        Target { label: "Upgrade leftovers", path: drive.join("$Windows.~BT"), contents_only: false, safe: true },
-        Target { label: "Upgrade leftovers", path: drive.join("$Windows.~WS"), contents_only: false, safe: true },
+        Target { label: "Upgrade leftovers", path: drive.join("$Windows.~BT"), action: Action::Remove, safe: true },
+        Target { label: "Upgrade leftovers", path: drive.join("$Windows.~WS"), action: Action::Remove, safe: true },
         Target {
             label: "Previous Windows (no going back after)",
             path: drive.join("Windows.old"),
-            contents_only: false,
+            action: Action::Remove,
             safe: false,
+        },
+        Target {
+            label: "Old versions of updated components (DISM, can take minutes)",
+            path: windows.join("WinSxS"),
+            action: Action::Dism,
+            safe: true,
         },
     ];
     // Not readable without administrator rights still means it's there.
@@ -58,7 +75,7 @@ pub fn targets() -> Vec<Target> {
 pub struct Item {
     pub target: Target,
     pub ticked: bool,
-    /// None until measured.
+    /// None until measured; always for DISM, which can't tell beforehand.
     pub size: Option<u64>,
     pub files: u64,
     /// Some of it couldn't be read, so the size may be short.
@@ -68,6 +85,8 @@ pub struct Item {
 enum Msg {
     Measured { index: usize, size: u64, files: u64, unreadable: bool },
     Cleaned { errors: Errors },
+    /// DISM is done: what the drive got back.
+    Freed { index: usize, bytes: u64 },
     Done,
 }
 
@@ -83,6 +102,11 @@ impl Errors {
         if self.first.is_none() {
             self.first = Some(format!("{}: {e}", path.display()));
         }
+    }
+
+    fn message(&mut self, message: String) {
+        self.count += 1;
+        self.first.get_or_insert(message);
     }
 }
 
@@ -134,6 +158,11 @@ impl Cleanup {
         self.items.iter().filter(|i| i.ticked)
     }
 
+    /// DISM is ticked: what it frees comes on top of the ticked size.
+    pub fn dism_ticked(&self) -> bool {
+        self.ticked().any(|i| i.target.action == Action::Dism)
+    }
+
     pub fn ticked_size(&self) -> u64 {
         self.ticked().filter_map(|i| i.size).sum()
     }
@@ -171,13 +200,18 @@ impl Cleanup {
         let (tx, rx) = mpsc::channel();
         let progress = Arc::new(Progress::default());
         self.progress = progress.clone();
-        let paths: Vec<PathBuf> = self.items.iter().map(|i| i.target.path.clone()).collect();
+        // WinSxS isn't measured: it's mostly hard links to Windows' own files,
+        // so adding up its files would show far more than it really takes.
+        let paths: Vec<Option<PathBuf>> =
+            self.items.iter().map(|i| (i.target.action != Action::Dism).then(|| i.target.path.clone())).collect();
         std::thread::spawn(move || {
             for (index, path) in paths.iter().enumerate() {
                 if progress.cancel.load(Ordering::Relaxed) {
                     return;
                 }
-                send_size(&tx, index, path, &progress);
+                if let Some(path) = path {
+                    send_size(&tx, index, path, &progress);
+                }
             }
             let _ = tx.send(Msg::Done);
         });
@@ -207,19 +241,31 @@ impl Cleanup {
         let (tx, rx) = mpsc::channel();
         let progress = Arc::new(Progress::default());
         self.progress = progress.clone();
-        let work: Vec<(usize, PathBuf, bool)> = self
+        let mut work: Vec<(usize, PathBuf, Action)> = self
             .items
             .iter()
             .enumerate()
             .filter(|(_, i)| i.ticked)
-            .map(|(index, i)| (index, i.target.path.clone(), i.target.contents_only))
+            .map(|(index, i)| (index, i.target.path.clone(), i.target.action))
             .collect();
+        // The quick deletes first, DISM (minutes) last.
+        work.sort_by_key(|(_, _, action)| *action == Action::Dism);
         std::thread::spawn(move || {
-            for (index, path, contents_only) in work {
+            for (index, path, action) in work {
                 let mut errors = Errors::default();
-                remove_tree(&path, contents_only, &progress, &mut errors);
-                let _ = tx.send(Msg::Cleaned { errors });
-                send_size(&tx, index, &path, &Progress::default());
+                if action == Action::Dism {
+                    let before = free_space(&path);
+                    if let Err(e) = run_dism(&progress) {
+                        errors.message(e);
+                    }
+                    let bytes = free_space(&path).zip(before).map_or(0, |(after, before)| after.saturating_sub(before));
+                    let _ = tx.send(Msg::Cleaned { errors });
+                    let _ = tx.send(Msg::Freed { index, bytes });
+                } else {
+                    remove_tree(&path, action == Action::Empty, &progress, &mut errors);
+                    let _ = tx.send(Msg::Cleaned { errors });
+                    send_size(&tx, index, &path, &Progress::default());
+                }
             }
             let _ = tx.send(Msg::Done);
         });
@@ -243,6 +289,12 @@ impl Cleanup {
                     item.files = files;
                     item.unreadable = unreadable;
                 }
+                Msg::Freed { index, bytes } => {
+                    if let Job::Cleaning { freed, .. } = job {
+                        *freed += bytes;
+                    }
+                    self.items[index].ticked = false;
+                }
                 Msg::Cleaned { errors: new } => {
                     if let Job::Cleaning { errors, .. } = job {
                         errors.count += new.count;
@@ -256,9 +308,9 @@ impl Cleanup {
                         Job::Cleaning { freed, errors } => Some(match errors.first {
                             None => format!("Freed {}", size::format(freed)),
                             Some(first) => format!(
-                                "Freed {}; {} could not be deleted (in use? try after a restart). First: {first}",
+                                "Freed {}; {} (files in use go after a restart). First: {first}",
                                 size::format(freed),
-                                size::counted(errors.count, "item"),
+                                size::counted(errors.count, "problem"),
                             ),
                         }),
                     };
@@ -290,6 +342,80 @@ fn send_size(tx: &Sender<Msg>, index: usize, path: &Path, progress: &Progress) {
         Msg::Measured { index, size: node.size, files: node.files, unreadable: node.unreadable_count() > 0 }
     };
     let _ = tx.send(msg);
+}
+
+/// Free space on the drive of `path`.
+fn free_space(path: &Path) -> Option<u64> {
+    crate::drives::of(&crate::drives::list(), path).map(|d| d.free)
+}
+
+/// Run DISM's component cleanup, the one Windows runs on its own now and then:
+/// old versions of updated components go. Not /ResetBase, so installed updates
+/// can still be uninstalled. Shows DISM's percentage as it goes.
+fn run_dism(progress: &Progress) -> Result<(), String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+
+    let windows = std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
+    let mut command = Command::new(windows.join(r"System32\Dism.exe"));
+    command
+        .args(["/Online", "/Cleanup-Image", "/StartComponentCleanup"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let set_current = |text: String| {
+        if let Ok(mut current) = progress.current.lock() {
+            *current = text;
+        }
+    };
+    set_current("Component store (DISM): starting".into());
+    let mut child = command.spawn().map_err(|e| format!("Could not start DISM: {e}"))?;
+    let mut output = Vec::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        let mut buffer = [0u8; 512];
+        while let Ok(n @ 1..) = stdout.read(&mut buffer) {
+            output.extend_from_slice(&buffer[..n]);
+            if let Some(percent) = last_percent(&output) {
+                set_current(format!("Component store (DISM): {percent:.1}%"));
+            }
+        }
+    }
+    let status = child.wait().map_err(|e| format!("DISM: {e}"))?;
+    set_current(String::new());
+    if status.success() {
+        return Ok(());
+    }
+    let code = status.code().unwrap_or(-1);
+    let why = match code {
+        740 => "it needs administrator rights".to_owned(),
+        _ => last_line(&output).unwrap_or_else(|| "no message".into()),
+    };
+    Err(format!("DISM failed (error {:#x}): {why}", code as u32))
+}
+
+/// The last percentage in DISM's output: "[=====  42.3%  ]" gives 42.3.
+fn last_percent(output: &[u8]) -> Option<f32> {
+    let end = output.iter().rposition(|&b| b == b'%')?;
+    let start = output[..end]
+        .iter()
+        .rposition(|b| !(b.is_ascii_digit() || *b == b'.' || *b == b','))
+        .map_or(0, |i| i + 1);
+    std::str::from_utf8(&output[start..end]).ok()?.replace(',', ".").parse().ok()
+}
+
+/// The last line of DISM's output that says something (not a progress bar).
+fn last_line(output: &[u8]) -> Option<String> {
+    String::from_utf8_lossy(output)
+        .split(['\r', '\n'])
+        .map(str::trim)
+        .rfind(|line| !line.is_empty() && !line.starts_with('['))
+        .map(str::to_owned)
 }
 
 /// Delete `path` and everything in it (with `keep_root`, only what's in it).
@@ -390,6 +516,16 @@ pub fn elevated() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reading_dism_output() {
+        let output = b"Deployment Image Servicing and Management tool\r\n\r\n[==    10.0%    ]\r[=====    42.3%    ]\r";
+        assert_eq!(last_percent(output), Some(42.3));
+        assert_eq!(last_percent(b"[==   7,5%  ]"), Some(7.5));
+        assert_eq!(last_percent(b"no progress yet"), None);
+        let failed = b"[==== 20.0% ====]\r\nError: 0x800f0806\r\n\r\nThe operation could not be completed due to pending operations.\r\n";
+        assert_eq!(last_line(failed).as_deref(), Some("The operation could not be completed due to pending operations."));
+    }
 
     #[test]
     fn emptying_keeps_the_folder_and_removing_takes_it() {
