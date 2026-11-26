@@ -1,0 +1,10 @@
+[package]
+name = "diskman"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ratatui = "0.30.2"
+rayon = "1.12.0"
+trash = "5.4.0"
+windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }
