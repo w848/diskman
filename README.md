@@ -8,6 +8,17 @@ diskman is a terminal app for Windows. It lists your drives and scans a drive or
 
 *The demo uses made-up drives, folders and programs.*
 
+## Install
+
+With [Scoop](https://scoop.sh):
+
+```sh
+scoop bucket add w848 https://github.com/w848/scoop-bucket
+scoop install diskman
+```
+
+Or download the zip from the [latest release](https://github.com/w848/diskman/releases/latest) and run `diskman.exe`. Windows SmartScreen may warn you the first time, because the program isn't signed.
+
 ## Build and run
 
 You need [Rust](https://rustup.rs) 1.88 or newer.
