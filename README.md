@@ -69,3 +69,7 @@ Things to know:
 ```sh
 cargo test
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).
