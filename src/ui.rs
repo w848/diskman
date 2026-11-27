@@ -100,7 +100,7 @@ fn draw_drives(frame: &mut Frame, app: &mut App, title: Rect, summary: Rect, lis
     .row_highlight_style(Style::new().bg(SELECTED))
     .highlight_symbol("▶ ");
     frame.render_stateful_widget(table, list, &mut app.drive_state);
-    frame.render_widget(keys_line(&[("Enter", "scan"), ("w", "update files"), ("p", "programs"), ("r", "refresh"), ("?", "help"), ("q", "quit")]), keys);
+    frame.render_widget(keys_line(&[("Enter", "scan"), ("w", "updates"), ("p", "programs"), ("r", "refresh"), ("?", "help"), ("q", "quit")]), keys);
 }
 
 fn draw_tree(frame: &mut Frame, app: &mut App, title: Rect, summary: Rect, list: Rect, keys: Rect) {
@@ -181,10 +181,9 @@ fn draw_tree(frame: &mut Frame, app: &mut App, title: Rect, summary: Rect, list:
             ("⌫", "back"),
             ("d", "recycle"),
             ("D", "delete"),
-            ("e", "explorer"),
             ("s", "sort"),
             ("r", "rescan"),
-            ("w", "update files"),
+            ("w", "updates"),
             ("p", "programs"),
             ("?", "help"),
         ]),

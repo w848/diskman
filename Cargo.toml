@@ -5,8 +5,14 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
+fontdue = { version = "0.9.5", optional = true }
 ratatui = "0.30.2"
 rayon = "1.12.0"
 trash = "5.4.0"
 windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_Com"] }
 winreg = "0.56.0"
+
+[features]
+# Draws the README's demo GIF from made-up data:
+# cargo run --release --features demo -- --demo-gif docs/demo.gif
+demo = ["dep:fontdue"]

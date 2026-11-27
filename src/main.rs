@@ -4,6 +4,8 @@
 
 mod app;
 mod cleanup;
+#[cfg(feature = "demo")]
+mod demo;
 mod drives;
 mod programs;
 mod scan;
@@ -20,6 +22,11 @@ use ratatui::crossterm::execute;
 use app::App;
 
 fn main() -> std::io::Result<()> {
+    #[cfg(feature = "demo")]
+    if std::env::args().nth(1).as_deref() == Some("--demo-gif") {
+        let out = std::env::args_os().nth(2).map_or_else(|| PathBuf::from("docs/demo.gif"), PathBuf::from);
+        return demo::record(&out);
+    }
     let start = std::env::args_os().nth(1).map(PathBuf::from);
     if let Some(path) = &start
         && !path.is_dir()

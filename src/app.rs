@@ -578,3 +578,63 @@ fn open_in_explorer(path: &Path) -> std::io::Result<()> {
 fn open_in_explorer(path: &Path) -> std::io::Result<()> {
     std::process::Command::new("xdg-open").arg(path.parent().unwrap_or(path)).spawn().map(drop)
 }
+
+/// Made-up states for the README's demo GIF (`--features demo`): nothing here
+/// scans, deletes or reads the real system.
+#[cfg(feature = "demo")]
+impl App {
+    pub fn demo(drives: Vec<Drive>) -> Self {
+        let mut app = App::new(None);
+        app.drives = drives;
+        app
+    }
+
+    /// A scan of `path` that seems to be running.
+    pub fn demo_scanning(&mut self, path: PathBuf, files: u64, bytes: u64, seconds: u64, current: &str) {
+        let progress = Arc::new(Progress::default());
+        progress.files.store(files, Ordering::Relaxed);
+        progress.bytes.store(bytes, Ordering::Relaxed);
+        if let Ok(mut c) = progress.current.lock() {
+            *c = current.to_owned();
+        }
+        let (_, rx) = mpsc::channel();
+        self.root_path = path.clone();
+        self.root = None;
+        self.path.clear();
+        self.screen = Screen::Tree;
+        let started = Instant::now().checked_sub(Duration::from_secs(seconds)).unwrap_or_else(Instant::now);
+        self.scan = Some(ScanJob { progress, rx, path: Vec::new(), full: path, started });
+    }
+
+    pub fn demo_scanned(&mut self, root: Node, seconds: f64) {
+        let full = self.root_path.clone();
+        self.scan = None;
+        self.root = Some(root);
+        self.sort_all();
+        self.state.select(Some(0));
+        self.status = format!("Scanned {} in {seconds:.1} s", full.display());
+    }
+
+    /// What a finished move to the Recycle Bin of the selected item shows.
+    pub fn demo_recycled(&mut self) {
+        let Some(node) = self.selected() else { return };
+        let (name, size) = (node.name.clone(), node.size);
+        if let Some(root) = &mut self.root {
+            scan::remove(root, &self.path, &name);
+        }
+        self.status = format!("Moved {name} ({}) to the Recycle Bin: empty it to get the space back", size::format(size));
+        self.clamp_selection();
+    }
+
+    pub fn demo_cleanup(&mut self, cleanup: Cleanup) {
+        self.cleanup = Some(cleanup);
+        self.back = self.screen;
+        self.screen = Screen::Cleanup;
+    }
+
+    pub fn demo_programs(&mut self, programs: Programs) {
+        self.programs = Some(programs);
+        self.back = self.screen;
+        self.screen = Screen::Programs;
+    }
+}

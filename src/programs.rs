@@ -603,6 +603,38 @@ pub fn date(time: SystemTime) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
+#[cfg(feature = "demo")]
+impl Program {
+    /// A made-up program, for the README's demo GIF.
+    pub fn demo(name: &str, publisher: &str, size: u64, installed_days_ago: u64, used_days_ago: Option<u64>, uninstall: &str) -> Self {
+        let now = SystemTime::now();
+        let ago = |days: u64| now - Duration::from_secs(days * 86_400 + 3_600);
+        Program {
+            name: name.into(),
+            publisher: publisher.into(),
+            version: String::new(),
+            installed: Some(ago(installed_days_ago)),
+            size: Some(size),
+            folder: None,
+            uninstall: uninstall.into(),
+            quiet_uninstall: None,
+            location: None,
+            icon: None,
+            last_used: used_days_ago.map(ago),
+        }
+    }
+}
+
+#[cfg(feature = "demo")]
+impl Programs {
+    pub fn demo(list: Vec<Program>) -> Self {
+        let mut programs =
+            Programs { list, state: TableState::default().with_selected(Some(0)), sort: Sort::LastUsed, elevated: true, checking: None };
+        programs.sort_list(None);
+        programs
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

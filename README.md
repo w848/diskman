@@ -4,6 +4,10 @@ See what takes the space on your drives, and free it.
 
 diskman is a terminal app for Windows. It lists your drives and scans a drive or folder on all CPU cores. You can then browse the folder tree biggest first and send what you don't need to the Recycle Bin, or delete it. It also has a cleanup screen for the Windows Update files that are safe to delete.
 
+![diskman: drives, a scan, the Windows Update cleanup and the programs list](docs/demo.gif)
+
+*The demo uses made-up drives, folders and programs.*
+
 ## Build and run
 
 You need [Rust](https://rustup.rs) 1.88 or newer.
@@ -90,6 +94,12 @@ Store apps don't appear in the list, because Windows keeps them elsewhere.
 
 ```sh
 cargo test
+```
+
+To make the demo GIF again after changing the screens (this needs ffmpeg):
+
+```sh
+cargo run --release --features demo -- --demo-gif docs/demo.gif
 ```
 
 ## License

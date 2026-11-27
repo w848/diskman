@@ -513,6 +513,14 @@ pub fn elevated() -> bool {
     false
 }
 
+#[cfg(feature = "demo")]
+impl Cleanup {
+    /// Made-up places and sizes, for the README's demo GIF.
+    pub fn demo(items: Vec<Item>) -> Self {
+        Cleanup { items, state: TableState::default().with_selected(Some(0)), elevated: true, progress: Arc::default(), job: None }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
