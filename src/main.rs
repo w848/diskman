@@ -5,6 +5,7 @@
 mod app;
 mod cleanup;
 mod drives;
+mod programs;
 mod scan;
 mod size;
 mod ui;

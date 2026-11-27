@@ -10,6 +10,7 @@ use ratatui::widgets::{Block, BorderType, Cell, Clear, Paragraph, Row, Table, Wr
 
 use crate::app::{App, Dialog, Screen, Sort};
 use crate::cleanup::Action;
+use crate::programs::{self, UNUSED_DAYS};
 use crate::size;
 
 const ACCENT: Color = Color::Rgb(0xf0, 0x7a, 0x3a);
@@ -33,11 +34,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Screen::Drives => draw_drives(frame, app, title, summary, list, keys),
         Screen::Tree => draw_tree(frame, app, title, summary, list, keys),
         Screen::Cleanup => draw_cleanup(frame, app, title, summary, list, keys),
+        Screen::Programs => draw_programs(frame, app, title, summary, list, keys),
     }
     frame.render_widget(Paragraph::new(app.status.as_str()).fg(Color::Yellow), status);
     match &app.dialog {
         Some(Dialog::Delete { permanent }) => draw_delete(frame, app, *permanent),
         Some(Dialog::Clean) => draw_clean(frame, app),
+        Some(Dialog::Uninstall) => draw_uninstall(frame, app),
         Some(Dialog::Help) => draw_help(frame),
         None => {}
     }
@@ -97,7 +100,7 @@ fn draw_drives(frame: &mut Frame, app: &mut App, title: Rect, summary: Rect, lis
     .row_highlight_style(Style::new().bg(SELECTED))
     .highlight_symbol("▶ ");
     frame.render_stateful_widget(table, list, &mut app.drive_state);
-    frame.render_widget(keys_line(&[("Enter", "scan"), ("w", "update files"), ("r", "refresh"), ("?", "help"), ("q", "quit")]), keys);
+    frame.render_widget(keys_line(&[("Enter", "scan"), ("w", "update files"), ("p", "programs"), ("r", "refresh"), ("?", "help"), ("q", "quit")]), keys);
 }
 
 fn draw_tree(frame: &mut Frame, app: &mut App, title: Rect, summary: Rect, list: Rect, keys: Rect) {
@@ -182,6 +185,7 @@ fn draw_tree(frame: &mut Frame, app: &mut App, title: Rect, summary: Rect, list:
             ("s", "sort"),
             ("r", "rescan"),
             ("w", "update files"),
+            ("p", "programs"),
             ("?", "help"),
         ]),
         keys,
@@ -372,6 +376,113 @@ fn draw_clean(frame: &mut Frame, app: &App) {
     );
 }
 
+fn draw_programs(frame: &mut Frame, app: &mut App, title: Rect, summary: Rect, list: Rect, keys: Rect) {
+    frame.render_widget(title_line("Programs".into()), title);
+    let Some(state) = &mut app.programs else { return };
+    let now = std::time::SystemTime::now();
+
+    let (unused, unused_size) = state.unused(now);
+    let mut text = vec![
+        Span::from(format!("{} installed", size::counted(state.list.len() as u64, "program"))),
+        Span::from(format!("   {unused} not used in {UNUSED_DAYS}+ days ({})", size::format(unused_size))).bold().fg(YELLOW),
+    ];
+    if state.checking() {
+        text.push(Span::from("   checking when each was last used...").fg(Color::Yellow));
+    } else if !state.elevated {
+        text.push(Span::from("   as administrator, diskman sees more of what you run").fg(DIM));
+    }
+    frame.render_widget(Line::from(text), summary);
+
+    let rows: Vec<Row> = state
+        .list
+        .iter()
+        .map(|p| {
+            let last = match p.last_used {
+                _ if state.checking() => "...".into(),
+                Some(time) => programs::ago(time, now),
+                None => "no record".into(),
+            };
+            let old = !state.checking() && p.unused(now);
+            let mut name = vec![Span::from(p.name.clone()).bold().fg(if old { YELLOW } else { Color::Reset })];
+            if !p.publisher.is_empty() {
+                name.push(Span::from(format!("  {}", p.publisher)).fg(DIM));
+            }
+            if let Some(installed) = p.installed {
+                name.push(Span::from(format!("  installed {}", programs::date(installed))).fg(DIM));
+            }
+            Row::new(vec![
+                Cell::from(last).fg(if old { YELLOW } else { DIM }),
+                Cell::from(Line::from(p.size.map(size::format).unwrap_or_default()).alignment(Alignment::Right)),
+                Cell::from(Line::from(name)),
+            ])
+        })
+        .collect();
+    let empty = rows.is_empty();
+    let header = |label: &'static str, sort: programs::Sort| if state.sort == sort { format!("{label} ▲") } else { label.into() };
+    let size_header = if state.sort == programs::Sort::Size { "Size ▼".to_owned() } else { "Size".into() };
+    let table = Table::new(rows, [Constraint::Length(14), Constraint::Length(9), Constraint::Fill(1)])
+        .header(
+            Row::new([
+                Cell::from(header("Last used", programs::Sort::LastUsed)),
+                Cell::from(Line::from(size_header).alignment(Alignment::Right)),
+                Cell::from(header("Program", programs::Sort::Name)),
+            ])
+            .fg(DIM),
+        )
+        .column_spacing(1)
+        .row_highlight_style(Style::new().bg(SELECTED).add_modifier(Modifier::BOLD))
+        .highlight_symbol("▶ ");
+    frame.render_stateful_widget(table, list, &mut state.state);
+    if empty {
+        let area = Rect { y: list.y + 2, height: 1, ..list };
+        frame.render_widget(Paragraph::new("No installed programs found").fg(DIM).alignment(Alignment::Center), area);
+    }
+
+    frame.render_widget(
+        keys_line(&[
+            ("Enter", "uninstall"),
+            ("x", "save list"),
+            ("e", "folder"),
+            ("s", "sort"),
+            ("r", "refresh"),
+            ("Esc", "back"),
+        ]),
+        keys,
+    );
+}
+
+fn draw_uninstall(frame: &mut Frame, app: &App) {
+    let Some(program) = app.programs.as_ref().and_then(|p| p.selected()) else { return };
+    let now = std::time::SystemTime::now();
+    let last = program.last_used.map_or_else(|| "no record of use".into(), |t| format!("last used {}", programs::ago(t, now)));
+    let size = program.size.map(|s| format!(", {}", size::format(s))).unwrap_or_default();
+    let text = vec![
+        Line::from(format!("Uninstall {}?", program.name)).bold(),
+        Line::from(""),
+        Line::from(format!("{last}{size}")).fg(DIR),
+        Line::from(""),
+        Line::from(program.uninstall.clone()).fg(DIM),
+        Line::from(""),
+        Line::from("Its own uninstaller opens: follow its steps.").fg(DIM),
+        Line::from(""),
+        Line::from(vec![
+            Span::from(" y ").fg(Color::Black).bg(YELLOW),
+            Span::from(" yes    "),
+            Span::from(" n ").fg(Color::Black).bg(DIM),
+            Span::from(" no"),
+        ]),
+    ];
+    let popup = centered(frame.area(), 76, 12);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(text)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true })
+            .block(Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(YELLOW))),
+        popup,
+    );
+}
+
 fn draw_help(frame: &mut Frame) {
     let keys = [
         ("↑ ↓  j k", "move"),
@@ -384,6 +495,7 @@ fn draw_help(frame: &mut Frame) {
         ("s", "sort by size / by name"),
         ("r", "scan this folder again"),
         ("w", "Windows Update files safe to delete"),
+        ("p", "programs, least recently used first"),
         ("Esc", "stop a scan, or go back"),
         ("mouse", "click to select, double-click to open,"),
         ("", "right-click to go back, wheel to scroll"),

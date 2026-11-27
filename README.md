@@ -35,6 +35,7 @@ Run it as administrator to scan protected system folders and to use the Windows 
 | `s` | Sort by size or by name |
 | `r` | Scan this folder again |
 | `w` | Windows Update cleanup |
+| `p` | Programs, least recently used first |
 | `Esc` | Stop a scan, or go back |
 | `?` | Help |
 | `q` or `Ctrl+C` | Quit |
@@ -63,6 +64,27 @@ Things to know:
 - **WinSxS:** its size isn't shown. Most of its files are shared with Windows itself, so adding them up would show far more than it really takes. diskman reports what DISM freed from how much free space the drive gains.
 - **No `/ResetBase`:** DISM runs without it, so you can still uninstall updates you've already installed.
 - **Never touched:** the rest of `WinSxS` (except through DISM), `Windows\Installer` and `SoftwareDistribution\DataStore`. Windows needs them, and DataStore holds your update history.
+
+## Programs you don't use
+
+Press `p` to see your installed programs, the ones used longest ago first, with their sizes. Programs not used in 90 days or more are shown in yellow.
+
+| Key | What it does |
+| --- | --- |
+| `Enter` or `u` | Run the program's own uninstaller, after you confirm |
+| `x` | Save the list as a CSV file in Documents, with each uninstall command |
+| `e` | Open the program's folder |
+| `s` | Sort by last use, by size or by name |
+| `r` | Read the list again, after an uninstall |
+
+How diskman knows when a program was last used:
+
+- **Launch history:** Windows records the programs you start from the Start menu, the taskbar or Explorer. diskman can always read this.
+- **Prefetch:** when diskman runs as administrator, it also reads Prefetch, which notes every program run lately. This includes games started from a launcher and tools run from a terminal.
+
+"No record" means neither of these saw the program start. It doesn't prove the program is never used, so run diskman as administrator for the best picture.
+
+Store apps don't appear in the list, because Windows keeps them elsewhere.
 
 ## Tests
 

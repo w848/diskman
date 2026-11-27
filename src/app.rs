@@ -14,6 +14,7 @@ use ratatui::widgets::TableState;
 
 use crate::cleanup::Cleanup;
 use crate::drives::{self, Drive};
+use crate::programs::{self, Programs};
 use crate::scan::{self, Node, Progress};
 use crate::size;
 
@@ -23,6 +24,8 @@ pub enum Screen {
     Tree,
     /// Windows Update files safe to delete.
     Cleanup,
+    /// Installed programs, least recently used first.
+    Programs,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -35,6 +38,8 @@ pub enum Dialog {
     Delete { permanent: bool },
     /// Delete the ticked Windows Update files?
     Clean,
+    /// Run the selected program's uninstaller?
+    Uninstall,
     Help,
 }
 
@@ -72,8 +77,9 @@ pub struct App {
     pub deleting: Option<DeleteJob>,
     pub dialog: Option<Dialog>,
     pub cleanup: Option<Cleanup>,
-    /// The screen to go back to from the cleanup.
-    cleanup_back: Screen,
+    pub programs: Option<Programs>,
+    /// The screen to go back to from the cleanup or the programs.
+    back: Screen,
     pub status: String,
     pub quit: bool,
     /// Where the list was drawn, to know which row the mouse is on.
@@ -96,7 +102,8 @@ impl App {
             deleting: None,
             dialog: None,
             cleanup: None,
-            cleanup_back: Screen::Drives,
+            programs: None,
+            back: Screen::Drives,
             status: String::new(),
             quit: false,
             list_area: Rect::default(),
@@ -202,6 +209,9 @@ impl App {
             self.status = message;
             self.drives = drives::list();
         }
+        if let Some(programs) = &mut self.programs {
+            programs.poll();
+        }
     }
 
     /// The background jobs need the screen redrawn now and then.
@@ -209,6 +219,16 @@ impl App {
         self.scan.is_some()
             || self.deleting.is_some()
             || self.cleanup.as_ref().is_some_and(|c| c.measuring() || c.cleaning())
+            || self.programs.as_ref().is_some_and(Programs::checking)
+    }
+
+    fn open_programs(&mut self) {
+        if self.screen == Screen::Programs {
+            return;
+        }
+        self.programs = Some(Programs::open());
+        self.back = self.screen;
+        self.screen = Screen::Programs;
     }
 
     fn open_cleanup(&mut self) {
@@ -219,7 +239,7 @@ impl App {
         if !self.cleanup.as_ref().is_some_and(Cleanup::cleaning) {
             self.cleanup = Some(Cleanup::open());
         }
-        self.cleanup_back = self.screen;
+        self.back = self.screen;
         self.screen = Screen::Cleanup;
     }
 
@@ -227,7 +247,7 @@ impl App {
         if !self.cleanup.as_ref().is_some_and(Cleanup::cleaning) {
             self.cleanup = None;
         }
-        self.screen = self.cleanup_back;
+        self.screen = self.back;
     }
 
     /// The list on the screen, and how long it is.
@@ -239,6 +259,7 @@ impl App {
                 Some((&mut self.state, len))
             }
             Screen::Cleanup => self.cleanup.as_mut().map(|c| (&mut c.state, c.items.len())),
+            Screen::Programs => self.programs.as_mut().map(|p| (&mut p.state, p.list.len())),
         }
     }
 
@@ -319,6 +340,10 @@ impl App {
                         self.status = "Cleaning Windows Update files...".into();
                     }
                 }
+                (Dialog::Uninstall, KeyCode::Char('y') | KeyCode::Enter) => {
+                    self.dialog = None;
+                    self.uninstall_selected();
+                }
                 (Dialog::Help, KeyCode::Char('?')) | (_, KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('q')) => {
                     self.dialog = None;
                 }
@@ -336,7 +361,9 @@ impl App {
             KeyCode::Home | KeyCode::Char('g') => self.move_selection(-1_000_000_000),
             KeyCode::End | KeyCode::Char('G') => self.move_selection(1_000_000_000),
             _ if self.screen == Screen::Cleanup => self.cleanup_key(key),
+            _ if self.screen == Screen::Programs => self.programs_key(key),
             KeyCode::Char('w') => self.open_cleanup(),
+            KeyCode::Char('p') => self.open_programs(),
             _ if self.screen == Screen::Drives => match key.code {
                 KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
                     if let Some(drive) = self.drive_state.selected().and_then(|i| self.drives.get(i)) {
@@ -406,6 +433,53 @@ impl App {
         }
     }
 
+    fn programs_key(&mut self, key: KeyEvent) {
+        let Some(list) = &mut self.programs else { return };
+        match key.code {
+            KeyCode::Enter | KeyCode::Char('u') | KeyCode::Delete => {
+                if list.selected().is_some() {
+                    self.dialog = Some(Dialog::Uninstall);
+                }
+            }
+            KeyCode::Char('x') => {
+                if list.checking() {
+                    self.status = "Wait for the last use of each program to be checked".into();
+                    return;
+                }
+                self.status = match programs::export(&list.list, std::time::SystemTime::now()) {
+                    Ok(path) => {
+                        let _ = open_in_explorer(&path);
+                        format!("Saved the list to {}", path.display())
+                    }
+                    Err(e) => format!("Could not save the list: {e}"),
+                };
+            }
+            KeyCode::Char('e') => match list.selected().and_then(|p| p.folder.clone()) {
+                Some(folder) => {
+                    if let Err(e) = open_in_explorer(&folder) {
+                        self.status = format!("Could not open Explorer: {e}");
+                    }
+                }
+                None => self.status = "No folder known for this program".into(),
+            },
+            KeyCode::Char('s') => list.next_sort(),
+            KeyCode::Char('r') => list.reload(),
+            KeyCode::Esc | KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('p') => {
+                self.programs = None;
+                self.screen = self.back;
+            }
+            _ => {}
+        }
+    }
+
+    fn uninstall_selected(&mut self) {
+        let Some(program) = self.programs.as_ref().and_then(Programs::selected) else { return };
+        self.status = match programs::run_uninstaller(&program.uninstall) {
+            Ok(()) => format!("The uninstaller of {} is open: when it's done, press r to refresh the list", program.name),
+            Err(e) => format!("Could not start the uninstaller of {}: {e}", program.name),
+        };
+    }
+
     pub fn mouse(&mut self, mouse: MouseEvent) {
         if self.dialog.is_some() {
             return;
@@ -436,7 +510,7 @@ impl App {
                 }
             }
             MouseEventKind::Down(MouseButton::Right) if self.screen == Screen::Tree => self.go_up(),
-            MouseEventKind::Down(MouseButton::Right) if self.screen == Screen::Cleanup => {
+            MouseEventKind::Down(MouseButton::Right) if matches!(self.screen, Screen::Cleanup | Screen::Programs) => {
                 self.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
             }
             _ => {}
