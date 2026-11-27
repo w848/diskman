@@ -1,0 +1,55 @@
+# Pushing a version tag (v0.1.0) builds diskman.exe on Windows and publishes
+# a GitHub Release with it. The tag must match the version in Cargo.toml.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      NAME: diskman-${{ github.ref_name }}-windows-x64
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Check the tag matches Cargo.toml
+        shell: pwsh
+        run: |
+          $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
+          if ("v$version" -ne "${{ github.ref_name }}") {
+            throw "Tag ${{ github.ref_name }} doesn't match version $version in Cargo.toml"
+          }
+
+      - name: Test
+        run: cargo test --locked
+
+      # The C runtime goes inside the .exe, so it runs on PCs without the
+      # Visual C++ Redistributable.
+      - name: Build
+        run: cargo build --release --locked
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory $env:NAME | Out-Null
+          Copy-Item target/release/diskman.exe, README.md, LICENSE $env:NAME
+          Compress-Archive $env:NAME "$env:NAME.zip"
+          $hash = (Get-FileHash "$env:NAME.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $env:NAME.zip" | Out-File -Encoding ascii "$env:NAME.zip.sha256"
+
+      - name: Publish the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" "$env:NAME.zip" "$env:NAME.zip.sha256" `
+            --title "diskman ${{ github.ref_name }}" --generate-notes
