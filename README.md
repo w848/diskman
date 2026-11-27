@@ -1,4 +1,4 @@
-# diskman
+# <img src="assets/diskman.png" width="40" alt=""> diskman
 
 See what takes the space on your drives, and free it.
 

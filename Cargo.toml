@@ -16,3 +16,6 @@ winreg = "0.56.0"
 # Draws the README's demo GIF from made-up data:
 # cargo run --release --features demo -- --demo-gif docs/demo.gif
 demo = ["dep:fontdue"]
+
+[build-dependencies]
+winresource = "0.1.34"
